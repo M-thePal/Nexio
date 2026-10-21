@@ -15,7 +15,7 @@ rm -rf "$OUT" && mkdir -p "$OUT/classes" "$OUT/dex"
 
 "$BT/aapt2" compile --dir res -o "$OUT/res.zip"
 "$BT/aapt2" link -o "$OUT/base.apk" -I "$ANDROID_JAR" --manifest AndroidManifest.xml "$OUT/res.zip" \
-  --min-sdk-version 26 --target-sdk-version 35 --version-code 1 --version-name 1.0
+  --min-sdk-version 26 --target-sdk-version 35 --version-code 2 --version-name 1.1.0
 
 "$JAVA_HOME/bin/javac" --release 17 -nowarn -Xlint:none -classpath "$ANDROID_JAR" \
   -d "$OUT/classes" $(find src -name '*.java')
