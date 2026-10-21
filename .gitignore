@@ -1,0 +1,5 @@
+.DS_Store
+android/build/
+android/Nexio.apk
+*.iconset/
+*.idsig
