@@ -9,7 +9,8 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
-    <application android:label="Nexio" android:icon="@mipmap/ic_launcher" android:allowBackup="false">
+    <application android:label="Nexio" android:icon="@mipmap/ic_launcher" android:allowBackup="false"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

@@ -11,7 +11,10 @@ import android.os.PowerManager;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.ViewGroup;
+import android.graphics.Color;
+import android.os.Build;
 import android.view.Gravity;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.EditText;
@@ -65,7 +68,7 @@ public class MainActivity extends Activity {
         int pad = dp(20);
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(pad, pad * 2, pad, pad);
+        col.setPadding(pad, pad, pad, pad);
 
         ImageView icon = new ImageView(this);
         icon.setImageDrawable(getApplicationInfo().loadIcon(getPackageManager()));
@@ -117,6 +120,21 @@ public class MainActivity extends Activity {
         col.setFocusableInTouchMode(true);
         col.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
         ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundColor(Color.parseColor("#0B0B0C"));
+        // Android 15+ draws edge-to-edge: keep content clear of the status and navigation bars.
+        scroll.setOnApplyWindowInsetsListener((v, insets) -> {
+            int top, bottom;
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets b = insets.getInsets(WindowInsets.Type.systemBars());
+                top = b.top;
+                bottom = b.bottom;
+            } else {
+                top = insets.getSystemWindowInsetTop();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            col.setPadding(pad, top + pad, pad, bottom + pad);
+            return insets;
+        });
         scroll.addView(col);
         setContentView(scroll);
         col.requestFocus();
