@@ -45,7 +45,7 @@ public class MainActivity extends Activity {
         applyIntentExtras(intent);
         pairing.setText(prefs.getString("pairing", ""));
         host.setText(prefs.getString("host", ""));
-        relay.setText(prefs.getString("relay", Sender.DEFAULT_RELAY));
+        relay.setText(Sender.relays(prefs));
     }
 
     @Override
@@ -60,7 +60,7 @@ public class MainActivity extends Activity {
         SharedPreferences.Editor e = prefs.edit();
         if (i.hasExtra("pair")) e.putString("pairing", i.getStringExtra("pair").trim());
         if (i.hasExtra("host")) e.putString("host", i.getStringExtra("host").trim());
-        if (i.hasExtra("relay")) e.putString("relay", i.getStringExtra("relay").trim());
+        if (i.hasExtra("relays")) e.putString("relays", i.getStringExtra("relays").trim().replace("\\n", "\n"));
         e.apply();
     }
 
@@ -105,10 +105,13 @@ public class MainActivity extends Activity {
         host.setText(prefs.getString("host", ""));
         col.addView(host);
 
-        col.addView(label("Relay server (used when not on the same network)"));
+        col.addView(label("Relays, tried in order after Wi-Fi (one per line: URL [token])"));
         relay = new EditText(this);
-        relay.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        relay.setText(prefs.getString("relay", Sender.DEFAULT_RELAY));
+        relay.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        relay.setMinLines(2);
+        relay.setTextSize(13);
+        relay.setText(Sender.relays(prefs));
         col.addView(relay);
 
         col.addView(button("Save", () -> { save(); refreshStatus("Saved"); }));
@@ -144,8 +147,8 @@ public class MainActivity extends Activity {
         prefs.edit()
                 .putString("pairing", pairing.getText().toString().trim())
                 .putString("host", host.getText().toString().trim())
-                .putString("relay", relay.getText().toString().trim().isEmpty()
-                        ? Sender.DEFAULT_RELAY : relay.getText().toString().trim())
+                .putString("relays", relay.getText().toString().trim().isEmpty()
+                        ? Sender.DEFAULT_RELAYS : relay.getText().toString().trim())
                 .apply();
     }
 

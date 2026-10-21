@@ -3,8 +3,9 @@
 //
 // Two transports carry the same encrypted frame (duplicates are dropped):
 //  - LAN: TCP on port 47800, advertised over Bonjour, one line per connection.
-//  - Relay: an ntfy server (default https://ntfy.sh) for when the phone and Mac are on
-//    different networks. The topic is derived from the pairing code; the relay only sees ciphertext.
+//  - Relays: ntfy servers (e.g. your own VPS, then https://ntfy.sh) for when the phone and Mac
+//    are on different networks. The Mac listens on all of them; the phone tries them in order.
+//    The topic is derived from the pairing code; relays only see ciphertext.
 //
 // Frame: base64(iv[12] || ciphertext || tag[16]),
 // AES-256-GCM with key = SHA256(pairing code). Plaintext is JSON:
@@ -24,7 +25,8 @@ let clipboardClearDelay: Double = 90    // seconds
 let supportDir = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/Nexio")
 let pairFile = supportDir.appendingPathComponent("pairing-code")
-let relayFile = supportDir.appendingPathComponent("relay")
+/// One relay per line: `URL [access-token]`. Lines starting with # are ignored.
+let relaysFile = supportDir.appendingPathComponent("relays")
 let defaultRelay = "https://ntfy.sh"
 
 func log(_ s: String) {
@@ -71,9 +73,20 @@ func relayTopic(_ pairing: String) -> String {
     return "nexio-" + hash.map { String(format: "%02x", $0) }.joined().prefix(32)
 }
 
-func relayBase() -> String {
-    let s = (try? String(contentsOf: relayFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    return (s.isEmpty ? defaultRelay : s).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+struct RelayConfig {
+    let base: String
+    let token: String?
+}
+
+func loadRelays() -> [RelayConfig] {
+    let text = (try? String(contentsOf: relaysFile, encoding: .utf8)) ?? ""
+    let relays = text.split(whereSeparator: \.isNewline).compactMap { line -> RelayConfig? in
+        let parts = line.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let url = parts.first, !url.hasPrefix("#") else { return nil }
+        return RelayConfig(base: url.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+                           token: parts.count > 1 ? parts[1] : nil)
+    }
+    return relays.isEmpty ? [RelayConfig(base: defaultRelay, token: nil)] : relays
 }
 
 // MARK: - Output
@@ -222,6 +235,7 @@ final class Server {
 /// Subscribes to the ntfy topic as a long-lived JSON stream and reconnects on failure or network change.
 final class RelaySubscriber: NSObject, URLSessionDataDelegate {
     let base: String
+    let token: String?
     let topic: String
     let onFrame: (String) -> Void
     private var session: URLSession!
@@ -231,8 +245,9 @@ final class RelaySubscriber: NSObject, URLSessionDataDelegate {
     private var backoff: Double = 1
     private let pathMonitor = NWPathMonitor()
 
-    init(base: String, topic: String, onFrame: @escaping (String) -> Void) {
-        self.base = base
+    init(relay: RelayConfig, topic: String, onFrame: @escaping (String) -> Void) {
+        self.base = relay.base
+        self.token = relay.token
         self.topic = topic
         self.onFrame = onFrame
     }
@@ -257,7 +272,9 @@ final class RelaySubscriber: NSObject, URLSessionDataDelegate {
         let since = lastId ?? "2m"
         guard let url = URL(string: "\(base)/\(topic)/json?since=\(since)") else { log("bad relay url"); return }
         buffer.removeAll()
-        task = session.dataTask(with: url)
+        var req = URLRequest(url: url)
+        if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        task = session.dataTask(with: req)
         task?.resume()
     }
 
@@ -268,6 +285,14 @@ final class RelaySubscriber: NSObject, URLSessionDataDelegate {
             guard let self, self.task == nil else { return }
             self.connect()
         }
+    }
+
+    func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            log("relay \(base) answered HTTP \(http.statusCode)\(http.statusCode == 401 || http.statusCode == 403 ? " — check the access token" : "")")
+        }
+        completionHandler(.allow)
     }
 
     func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
@@ -314,10 +339,12 @@ do {
     Notifier.shared.setUp()
     let server = Server(key: deriveKey(code))
     try server.start()
-    let relay = RelaySubscriber(base: relayBase(), topic: relayTopic(code)) { frame in
-        _ = server.process(frame, from: "relay")
+    let relays = loadRelays().map { cfg in
+        RelaySubscriber(relay: cfg, topic: relayTopic(code)) { frame in
+            _ = server.process(frame, from: "relay \(cfg.base)")
+        }
     }
-    relay.start()
+    relays.forEach { $0.start() }
     dispatchMain()
 } catch {
     log("fatal: \(error)")

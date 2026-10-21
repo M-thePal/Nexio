@@ -2,9 +2,14 @@ package com.nexio.otp;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.Uri;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.net.wifi.WifiManager;
+import android.text.TextUtils;
 import android.util.Base64;
 import android.util.Log;
 
@@ -20,6 +25,8 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -31,15 +38,16 @@ import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Encrypts an OTP and sends it to the Mac receiver. Blocking — call off the main thread.
- * The same frame goes over the LAN (direct TCP, Bonjour discovery) and the ntfy relay in
- * parallel; the Mac drops whichever copy arrives second.
+ * Paths are tried in order, stopping at the first success:
+ *   1. LAN: direct TCP to the Mac (found via Bonjour), only when on Wi-Fi;
+ *   2. each relay from the "relays" setting, in order (e.g. your VPS, then ntfy.sh).
  */
 public final class Sender {
     static final String TAG = "Nexio";
     static final String PREFS = "nexio";
     static final String SERVICE_TYPE = "_nexio._tcp";
     static final int DEFAULT_PORT = 47800;
-    static final String DEFAULT_RELAY = "https://ntfy.sh";
+    static final String DEFAULT_RELAYS = "https://ntfy.sh";
 
     private Sender() {}
 
@@ -47,7 +55,12 @@ public final class Sender {
         return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
-    /** Sends the code over LAN and relay at once. Returns null on success, else an error. */
+    /** Relay list, one per line: {@code URL [access-token]}. */
+    public static String relays(SharedPreferences p) {
+        return p.getString("relays", p.getString("relay", DEFAULT_RELAYS));
+    }
+
+    /** Sends the code over the first path that works. Returns null on success, else an error. */
     public static String send(Context ctx, String code, String sender) {
         SharedPreferences p = prefs(ctx);
         String pairing = p.getString("pairing", "");
@@ -64,38 +77,29 @@ public final class Sender {
             return "Encrypt failed: " + e;
         }
 
-        AtomicReference<String> lanErr = new AtomicReference<>("timeout");
-        AtomicReference<String> relayErr = new AtomicReference<>("timeout");
-        CountDownLatch anyOk = new CountDownLatch(1);
-        CountDownLatch allDone = new CountDownLatch(2);
-        AtomicReference<String> via = new AtomicReference<>();
+        List<String> errors = new ArrayList<>();
 
-        new Thread(() -> {
+        if (onWifi(ctx)) {
             String err = sendLan(ctx, p, frame);
-            lanErr.set(err);
-            if (err == null) { via.compareAndSet(null, "Wi-Fi"); anyOk.countDown(); }
-            allDone.countDown();
-        }).start();
-        new Thread(() -> {
-            String err = postRelay(p.getString("relay", DEFAULT_RELAY), relayTopic(pairing), frame);
-            relayErr.set(err);
-            if (err == null) { via.compareAndSet(null, "relay"); anyOk.countDown(); }
-            allDone.countDown();
-        }).start();
-
-        try {
-            // Return as soon as one path succeeds, or when both have finished/failed.
-            long deadline = System.currentTimeMillis() + 15000;
-            while (anyOk.getCount() > 0 && allDone.getCount() > 0 && System.currentTimeMillis() < deadline) {
-                anyOk.await(200, TimeUnit.MILLISECONDS);
-            }
-        } catch (InterruptedException ignored) {}
-
-        if (via.get() != null) {
-            p.edit().putString("lastPath", via.get()).apply();
-            return null;
+            if (err == null) return delivered(p, "Wi-Fi");
+            errors.add("Wi-Fi: " + err);
         }
-        return "Wi-Fi: " + lanErr.get() + "; relay: " + relayErr.get();
+
+        String topic = relayTopic(pairing);
+        for (String line : relays(p).split("\\n")) {
+            String[] parts = line.trim().split("\\s+");
+            if (parts[0].isEmpty() || parts[0].startsWith("#")) continue;
+            String host = Uri.parse(parts[0]).getHost();
+            String err = postRelay(parts[0], parts.length > 1 ? parts[1] : null, topic, frame);
+            if (err == null) return delivered(p, host);
+            errors.add(host + ": " + err);
+        }
+        return errors.isEmpty() ? "no path available" : TextUtils.join("; ", errors);
+    }
+
+    private static String delivered(SharedPreferences p, String via) {
+        p.edit().putString("lastPath", via).apply();
+        return null;
     }
 
     /** Which path delivered the last successful send (for the status line). */
@@ -103,35 +107,47 @@ public final class Sender {
         return prefs(ctx).getString("lastPath", "");
     }
 
+    @SuppressWarnings("deprecation")
+    private static boolean onWifi(Context ctx) {
+        ConnectivityManager cm = (ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
+        for (Network n : cm.getAllNetworks()) {
+            NetworkCapabilities nc = cm.getNetworkCapabilities(n);
+            if (nc != null && (nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                    || nc.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))) return true;
+        }
+        return false;
+    }
+
     private static String sendLan(Context ctx, SharedPreferences p, String frame) {
         String host = p.getString("host", "");
         int port = p.getInt("port", DEFAULT_PORT);
-        String err = host.isEmpty() ? "no address" : deliver(host, port, frame);
-        if (err == null) return null;
+        if (!host.isEmpty() && deliver(host, port, frame, 1500) == null) return null;
 
         // IP changed or different network: look for the Mac via Bonjour.
-        String[] found = discover(ctx, 5000);
+        String[] found = discover(ctx, 3000);
         if (found == null) return "Mac not on this network";
         p.edit().putString("host", found[0]).putInt("port", Integer.parseInt(found[1])).apply();
-        return deliver(found[0], Integer.parseInt(found[1]), frame);
+        return deliver(found[0], Integer.parseInt(found[1]), frame, 3000);
     }
 
-    private static String postRelay(String base, String topic, String frame) {
+    private static String postRelay(String base, String token, String topic, String frame) {
         HttpURLConnection c = null;
         try {
             while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
             c = (HttpURLConnection) new URL(base + "/" + topic).openConnection();
-            c.setConnectTimeout(6000);
-            c.setReadTimeout(6000);
+            c.setConnectTimeout(5000);
+            c.setReadTimeout(5000);
             c.setRequestMethod("POST");
             c.setDoOutput(true);
             c.setRequestProperty("Content-Type", "text/plain");
             c.setRequestProperty("Cache", "yes");
             c.setRequestProperty("Firebase", "no");
+            if (token != null) c.setRequestProperty("Authorization", "Bearer " + token);
             try (OutputStream out = c.getOutputStream()) {
                 out.write(frame.getBytes(StandardCharsets.US_ASCII));
             }
             int code = c.getResponseCode();
+            if (code == 401 || code == 403) return "access denied (token?)";
             return code / 100 == 2 ? null : "HTTP " + code;
         } catch (Exception e) {
             return describe(e);
@@ -170,12 +186,12 @@ public final class Sender {
     }
 
     public static String ping(String host, int port) {
-        return deliver(host, port, "PING");
+        return deliver(host, port, "PING", 3000);
     }
 
-    private static String deliver(String host, int port, String frame) {
+    private static String deliver(String host, int port, String frame, int connectTimeoutMs) {
         try (Socket s = new Socket()) {
-            s.connect(new InetSocketAddress(host, port), 3000);
+            s.connect(new InetSocketAddress(host, port), connectTimeoutMs);
             s.setSoTimeout(3000);
             OutputStream out = s.getOutputStream();
             out.write((frame + "\n").getBytes(StandardCharsets.US_ASCII));

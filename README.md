@@ -20,10 +20,13 @@ It works when the phone and Mac are on the same Wi-Fi **and** when they aren't (
 ## Features
 
 - **Automatic OTP detection.** Keyword + nearest-number heuristic that handles English and Persian messages, Persian/Arabic-Indic digits (۱۲۳۴), and ignores amounts (`1,250,000`), card numbers (`6104-33**-…`), times and dates.
-- **Works on any network.** Each code is sent over two paths at once, and the Mac keeps whichever arrives first:
-  - **LAN:** direct TCP. The Mac is found via Bonjour (`_nexio._tcp`), so changing IPs don't matter.
-  - **Relay:** an [ntfy](https://ntfy.sh) server (default `https://ntfy.sh`) for when the devices are on different networks.
-- **End-to-end encrypted.** AES-256-GCM with a key derived from a pairing code that never leaves your devices. The relay only ever sees ciphertext, and the topic name is derived from the pairing code, so it can't be guessed.
+- **Works on any network.** The phone tries each path in order and stops at the first one that works:
+  1. **LAN:** direct TCP when on Wi-Fi. The Mac is found via Bonjour (`_nexio._tcp`), so changing IPs don't matter.
+  2. **Your own relay** (optional): a self-hosted [ntfy](https://ntfy.sh) server, e.g. on a VPS, protected by an access token.
+  3. **Public relay:** `https://ntfy.sh`.
+
+  The Mac listens on the LAN and on every relay at the same time, and drops duplicates.
+- **End-to-end encrypted.** AES-256-GCM with a key derived from a pairing code that never leaves your devices. Relays only ever see ciphertext, and the topic name is derived from the pairing code, so it can't be guessed.
 - **Minimal data.** Only the code and the sender name leave the phone, never the message text.
 - **Replay protection.** Messages older than 2 minutes and duplicates are dropped.
 - **Clipboard hygiene.** The code is cleared from the clipboard after 90 s (if you haven't copied something else in the meantime).
@@ -89,16 +92,45 @@ adb shell am start -n com.nexio.otp/.MainActivity --es pair "$(~/Applications/Ne
 > [!IMPORTANT]
 > Tap **Disable battery optimization** in the app. Otherwise many vendors (Samsung, Xiaomi, …) cut the app's network access while the screen is off, and codes arrive late or not at all.
 
-### Using your own relay
+### Adding your own relay (recommended)
 
-If `ntfy.sh` is blocked or you'd rather self-host [ntfy](https://docs.ntfy.sh/install/):
+Public relays can be blocked on some networks. A small VPS running ntfy, reachable from your phone's networks, makes delivery reliable.
+
+On the server (Linux, amd64):
 
 ```bash
-echo "https://ntfy.example.com" > ~/Library/Application\ Support/Nexio/relay
-mac/install.sh
+V=v2.32.0; N=ntfy_${V#v}_linux_amd64
+curl -fL -o /tmp/ntfy.tgz https://github.com/binwiederhier/ntfy/releases/download/$V/$N.tar.gz
+tar xzf /tmp/ntfy.tgz -C /tmp && install -m 755 /tmp/$N/ntfy /usr/local/bin/ntfy
+useradd --system --no-create-home --shell /usr/sbin/nologin ntfy
+mkdir -p /etc/ntfy /var/lib/ntfy && chown ntfy:ntfy /var/lib/ntfy
+cat > /etc/ntfy/server.yml <<EOF
+listen-http: ":47801"
+cache-file: "/var/lib/ntfy/cache.db"
+cache-duration: "12h"
+auth-file: "/var/lib/ntfy/auth.db"
+auth-default-access: "deny-all"
+web-root: "disable"
+EOF
+export NTFY_AUTH_FILE=/var/lib/ntfy/auth.db
+NTFY_PASSWORD=$(head -c 24 /dev/urandom | base64) ntfy user add nexio
+ntfy access nexio "nexio-*" rw
+ntfy token add nexio          # prints tk_...
+chown -R ntfy:ntfy /var/lib/ntfy
 ```
 
-Then enter the same URL in the Android app's **Relay server** field.
+Then run `ntfy serve --config /etc/ntfy/server.yml` as user `ntfy`, for example from a systemd unit.
+
+List the relays one per line as `URL [token]`, in the same order on both devices:
+
+- **Mac:** `~/Library/Application Support/Nexio/relays`, then rerun `mac/install.sh`.
+  ```
+  http://your-server:47801 tk_xxxxxxxxxxxxxxxx
+  https://ntfy.sh
+  ```
+- **Android:** the **Relays** field in the app.
+
+Plain HTTP is fine here: frames are end-to-end encrypted, and the token only controls who may use your server.
 
 ## Project structure
 
