@@ -113,9 +113,13 @@ public class MainActivity extends Activity {
         col.addView(button("Send test code", this::sendTest));
         col.addView(button("Disable battery optimization", this::askBattery));
 
+        // Keep focus off the text fields so the screen opens at the top, not scrolled to an input.
+        col.setFocusableInTouchMode(true);
+        col.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
         ScrollView scroll = new ScrollView(this);
         scroll.addView(col);
         setContentView(scroll);
+        col.requestFocus();
     }
 
     private void save() {

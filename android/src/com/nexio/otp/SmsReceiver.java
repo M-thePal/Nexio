@@ -11,6 +11,9 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 public class SmsReceiver extends BroadcastReceiver {
+    private static final long RETRY_WINDOW_MS = 35_000;
+    private static final long RETRY_DELAY_MS = 4_000;
+
     @Override
     public void onReceive(Context context, Intent intent) {
         if (!Telephony.Sms.Intents.SMS_RECEIVED_ACTION.equals(intent.getAction())) return;
@@ -30,7 +33,14 @@ public class SmsReceiver extends BroadcastReceiver {
                 for (Map.Entry<String, StringBuilder> e : bySender.entrySet()) {
                     String code = OtpParser.extract(e.getValue().toString());
                     if (code == null) continue;
+                    // Retry while the network may be switching (Wi-Fi ↔ mobile, VPN reconnecting).
+                    // The Mac rejects codes older than 2 minutes, so give up well before that.
+                    long deadline = System.currentTimeMillis() + RETRY_WINDOW_MS;
                     String err = Sender.send(context, code, e.getKey());
+                    while (err != null && System.currentTimeMillis() + RETRY_DELAY_MS < deadline) {
+                        try { Thread.sleep(RETRY_DELAY_MS); } catch (InterruptedException ie) { break; }
+                        err = Sender.send(context, code, e.getKey());
+                    }
                     Sender.prefs(context).edit()
                             .putString("last", (err == null ? "Sent via " + Sender.lastPath(context) + " — " : "Failed: " + err + " — ")
                                     + "code from " + e.getKey())

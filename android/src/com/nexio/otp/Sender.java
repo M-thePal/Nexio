@@ -134,10 +134,19 @@ public final class Sender {
             int code = c.getResponseCode();
             return code / 100 == 2 ? null : "HTTP " + code;
         } catch (Exception e) {
-            return e.getClass().getSimpleName() + ": " + e.getMessage();
+            return describe(e);
         } finally {
             if (c != null) c.disconnect();
         }
+    }
+
+    /** Short, human-readable reason for a network failure. */
+    static String describe(Exception e) {
+        if (e instanceof java.net.SocketTimeoutException) return "timed out";
+        if (e instanceof java.net.UnknownHostException) return "DNS lookup failed";
+        if (e instanceof java.net.ConnectException) return "connection refused";
+        if (e instanceof javax.net.ssl.SSLException) return "TLS error";
+        return e.getClass().getSimpleName();
     }
 
     static String normalize(String pairing) {
@@ -175,7 +184,7 @@ public final class Sender {
             if ("OK".equals(reply)) return null;
             return "Mac rejected message (wrong pairing code?)";
         } catch (Exception e) {
-            return e.getClass().getSimpleName() + ": " + e.getMessage();
+            return describe(e);
         }
     }
 
